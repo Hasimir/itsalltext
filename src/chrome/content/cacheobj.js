@@ -27,7 +27,8 @@ function CacheObj(node) {
     var that = this,
     hitch_re = /^hitched_/,
     doc = node.ownerDocument,
-    host,
+    starting_urlname,
+    urlname,
     hash,
     method,
     extension;
@@ -79,15 +80,52 @@ function CacheObj(node) {
     /* Figure out where we will store the file.  While the filename can
      * change, the directory that the file is stored in should not!
      */
-    host = window.escape(doc.location.hostname);
     hash = itsalltext.hashString(
         [ doc.location.protocol,
             doc.location.port,
             doc.location.search ? doc.location.search : '?',
             doc.location.pathname,
             that.node_id].join(':')
-    );
-    that.base_filename = [host, hash.slice(0, 10)].join('.');
+    ).slice(0, 8);
+
+    /* Determine the local filename for the document. */
+    // Windows has a max filename length of 129 chars.
+    starting_urlname = (doc.location.host + doc.location.pathname)
+        .replace(/[\/\\]/g, '_')
+        .replace(/\.\.+/g, '.')
+        .replace(/[^a-z0-9_.-]+/gi, '')
+        .substring(0, 100);
+    //disabled-debug -- itsalltext.debug("starting_urlname:", starting_urlname);
+    for (urlname = starting_urlname; ;) {
+        that.base_filename = [window.encodeURIComponent(urlname), hash].join('.');
+        try {
+            // Hope isWritable() would work here, but it throws
+            // NS_ERROR_FILE_TARGET_DOES_NOT_EXIST if the file is
+            // nonexistent.
+            this.getFile().isFile();
+        } catch (e) {
+            switch (e.name) {
+              case 'NS_ERROR_FILE_NAME_TOO_LONG':
+                if (urlname.length > 0) {
+                    urlname = urlname.slice(0, -1);
+                    continue;
+                }
+                break;
+              case 'NS_ERROR_FILE_NOT_FOUND':
+                break;
+              case 'NS_ERROR_FILE_TARGET_DOES_NOT_EXIST':
+                break;
+              default:
+                itsalltext.debug("File naming, falling back to old-style;", e);
+                that.base_filename = [window.encodeURIComponent(doc.location.host), hash].join('.');
+                break;
+            }
+        }
+        break;
+    }
+    that.base_filename = [window.encodeURIComponent(urlname), hash].join('.');
+    //disabled-debug -- itsalltext.debug("base_filename", that.base_filename);
+
     /* The current extension.
      * @type String
      */
@@ -188,10 +226,11 @@ CacheObj.prototype.setExtension = function (ext) {
         return; /* It's already set.  No problem. */
     }
 
+    this.extension = ext;
+
     /* Create the nsIFile object */
     var file = this.getFile();
 
-    this.extension = ext;
     if (file.exists()) {
         this.timestamp = file.lastModifiedTime;
         this.size      = file.fileSize;
@@ -214,7 +253,6 @@ CacheObj.prototype.getExtension = function () {
     return this.extension;
 }
 
-
 /**
  * Returns an nsIFile object for the current file.
  * @returns {nsIFile} A file object for the directory.
@@ -235,6 +273,8 @@ CacheObj.prototype.initFromExistingFile = function () {
     fobj = itsalltext.factoryFile(itsalltext.getWorkingDir()),
     entries,
     ext = null,
+    last_mtime = 0,
+    prev_found = null,
     tmpfiles = /(\.bak|.tmp|~)$/,
     entry;
     if (fobj.exists() && fobj.isDirectory()) {
@@ -244,14 +284,18 @@ CacheObj.prototype.initFromExistingFile = function () {
             entry.QueryInterface(Components.interfaces.nsIFile);
             if (entry.leafName.indexOf(base) === 0) {
                 // startswith
-                if (ext === null && !entry.leafName.match(tmpfiles)) {
+                if (entry.lastModifiedTime > last_mtime && !entry.leafName.match(tmpfiles)) {
+                    if (prev_found !== null) {
+                        try {
+                            prev_found.remove(false);
+                        } catch (e) {
+                            //disabled-debug -- itsalltext.debug('unable to remove', entry, 'because:', e);
+                        }
+                    }
                     ext = entry.leafName.slice(base.length);
+                    last_mtime = entry.lastModifiedTime;
+                    prev_found = entry;
                     continue;
-                }
-                try {
-                    entry.remove(false);
-                } catch (e) {
-                    //disabled-debug -- itsalltext.debug('unable to remove', entry, 'because:', e);
                 }
             }
         }
@@ -582,6 +626,10 @@ CacheObj.prototype.update = function () {
             var event = this.node.ownerDocument.createEvent("HTMLEvents");
             event.initEvent('change', true, false);
             this.node.dispatchEvent(event);
+
+            var inputEvent = this.node.ownerDocument.createEvent("HTMLEvents");
+            inputEvent.initEvent('input', true, false);
+            this.node.dispatchEvent(inputEvent);
 
             return true;
         }
